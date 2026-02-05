@@ -1,0 +1,140 @@
+# Docker _BASE_ Buildfile for ROCm 6.4 to use Ollama/WhisperX/ComfyUI with a RX570 / Polaris / gfx803 AMD GPU
+# Arch Linux variant (pinned ROCm paths) using rmake.py from rocm-libraries
+# created, build and compiled by Robert Rosenbusch at May-April 2025
+
+FROM archlinux:latest
+
+SHELL ["/bin/bash", "-c"]
+ENV ROCM_PATH=/opt/rocm \
+    PATH=/opt/rocm/bin:/opt/rocm/llvm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/llvm/lib:/usr/local/lib:/usr/lib \
+    COMMANDLINE_ARGS='' \
+    ### how many CPUCores are using while compiling
+    MAX_JOBS=14 \
+    ### Settings for AMD GPU RX570/RX580/RX590 GPU
+    HSA_OVERRIDE_GFX_VERSION=8.0.3 \
+    PYTORCH_ROCM_ARCH=gfx803 \
+    ROCM_ARCH=gfx803 \
+    TORCH_BLAS_PREFER_HIPBLASLT=0 \
+    ROC_ENABLE_PRE_VEGA=1 \
+    USE_CUDA=0 \
+    USE_ROCM=1 \
+    USE_NINJA=1 \
+    FORCE_CUDA=1 \
+    JOBLIB_START_METHOD=thread \
+    #TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1 \
+    #PYTORCH_TUNABLEOP_ENABLED=1 \
+#######
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONENCODING=UTF-8 \
+    REQS_FILE='requirements.txt' \
+    PIP_ROOT_USER_ACTION='ignore' \
+    COMMANDLINE_ARGS=''
+
+## Write the Environment VARSs to global... to compile later with while you use #docker export# and/or #docker commit# to save Storage Consumption
+RUN echo OLLAMA_HOST=${OLLAMA_HOST} >> /etc/environment && \
+    echo MAX_JOBS=${MAX_JOBS} >> /etc/environment && \
+    echo HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION} >> /etc/environment && \
+    echo PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH} >> /etc/environment && \
+    echo ROCM_ARCH=${ROCM_ARCH} >> /etc/environment && \
+    echo TORCH_BLAS_PREFER_HIPBLASLT=${TORCH_BLAS_PREFER_HIPBLASLT} >> /etc/environment && \
+    echo ROC_ENABLE_PRE_VEGA=${ROC_ENABLE_PRE_VEGA} >> /etc/environment && \
+    echo USE_CUDA=${USE_CUDA} >> /etc/environment && \
+    echo USE_ROCM=${USE_ROCM} >> /etc/environment && \
+    echo USE_NINJA=${USE_NINJA} >> /etc/environment && \
+    echo FORCE_CUDA=${FORCE_CUDA} >> /etc/environment && \
+    echo JOBLIB_START_METHOD=${JOBLIB_START_METHOD} >> /etc/environment && \
+    echo PIP_ROOT_USER_ACTION=${PIP_ROOT_USER_ACTION} >> /etc/environment && \
+    true
+
+## Export the AMD Stuff
+RUN export OLLAMA_HOST=${OLLAMA_HOST} && \
+    export MAX_JOBS=${MAX_JOBS} && \
+    export HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION} && \
+    export ROC_ENABLE_PRE_VEGA=${ROC_ENABLE_PRE_VEGA} && \
+    export PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH} && \
+    export ROCM_ARCH=${ROCM_ARCH} && \
+    export TORCH_BLAS_PREFER_HIPBLASLT=${TORCH_BLAS_PREFER_HIPBLASLT} && \
+    export USE_CUDA=${USE_CUDA} && \
+    export USE_ROCM=${USE_ROCM} && \
+    export USE_NINJA=${USE_NINJA} && \
+    export FORCE_CUDA=${FORCE_CUDA} && \
+    export JOBLIB_START_METHOD=${JOBLIB_START_METHOD} && \
+    export PIP_ROOT_USER_ACTION=${PIP_ROOT_USER_ACTION} && \
+    true
+
+## Bootstrap keyring + paru, then use paru for all installs
+RUN pacman-key --init && \
+    pacman-key --populate archlinux && \
+    true
+
+RUN pacman -Syu --noconfirm --needed && \
+    pacman -S --noconfirm --needed base-devel git sudo && \
+    true
+
+RUN useradd -m -G wheel builder && \
+    echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder && \
+    chmod 0440 /etc/sudoers.d/builder && \
+    sudo -u builder bash -lc "git clone https://aur.archlinux.org/paru.git /home/builder/paru && cd /home/builder/paru && makepkg -si --noconfirm" && \
+    rm -rf /home/builder/paru && \
+    true
+
+RUN paru -Syu --noconfirm --needed && \
+    true
+
+RUN paru -S --noconfirm --needed \
+      python python-virtualenv python-pip cmake wget ffmpeg curl go && \
+    true
+
+RUN paru -S --noconfirm --needed \
+      openblas gperftools && \
+    true
+
+RUN paru -S --noconfirm --needed \
+      ccache tmux mc pigz plocate vim && \
+    true
+
+RUN paru -S --noconfirm --needed \
+      rocm-cmake && \
+    true
+
+RUN paru -S --noconfirm --needed \
+      rocm-llvm && \
+    true
+
+RUN paru -S --noconfirm --needed \
+      rocm-hip-sdk && \
+    true
+
+RUN paru -S --noconfirm --needed \
+      python-joblib && \
+    true
+
+RUN python3 -m venv .venv && \
+    . .venv/bin/activate && \
+    pip install --upgrade pip wheel && \
+    pip install cmake mkl mkl-include && \
+    true
+
+## Install AMDGPU_TOP to monitor GPU utilization
+RUN paru -S --noconfirm --needed amdgpu_top && \
+    true
+
+## (Re-)Compile rocBLAS for gfx803 via rocm-libraries/rmake.py
+ENV ROCM_LIBRARIES_GIT_VERSION="rocm-7.2.0"
+RUN echo "Checkout ROCm Libraries: ${ROCM_LIBRARIES_GIT_VERSION}" && \
+    git clone https://github.com/ROCm/rocm-libraries.git /rocm-libraries && \
+    cd /rocm-libraries && \
+    git checkout ${ROCM_LIBRARIES_GIT_VERSION} || git checkout main && \
+    true
+
+RUN echo "joblib" >> /rocm-libraries/projects/rocblas/requirements.txt && \
+    true
+
+WORKDIR /rocm-libraries/projects/rocblas
+RUN echo "BUILDING rocBLAS (rmake.py) with ARCH: ${ROCM_ARCH} and JOBS: ${MAX_JOBS}" && \
+    python3 ./rmake.py -a ${ROCM_ARCH} -j ${MAX_JOBS} && \
+    true
+
+CMD ["/bin/bash","-c"]
