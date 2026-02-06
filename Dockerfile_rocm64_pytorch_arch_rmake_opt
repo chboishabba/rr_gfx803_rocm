@@ -92,6 +92,37 @@ RUN echo "** Checkout Torchvision Version: ${TORCH_GIT_VERSION} ** "
 RUN git clone https://github.com/pytorch/vision.git -b ${TORCH_GIT_VERSION} /vision
 
 WORKDIR /vision
+RUN cat > /tmp/patch_video_stream.py <<'PY' \
+ && /opt/py313/bin/python /tmp/patch_video_stream.py \
+ && rm -f /tmp/patch_video_stream.py
+from pathlib import Path
+
+p = Path("/vision/torchvision/csrc/io/decoder/video_stream.cpp")
+s = p.read_text()
+
+old = "header->keyFrame = frame_->key_frame;"
+new = (
+    "#if LIBAVUTIL_VERSION_MAJOR >= 59\n"
+    "    header->keyFrame = (frame_->flags & AV_FRAME_FLAG_KEY) != 0;\n"
+    "#else\n"
+    "    header->keyFrame = frame_->key_frame;\n"
+    "#endif"
+)
+s = s.replace(old, new)
+
+if "#include <libavutil/frame.h>" not in s:
+    s = s.replace(
+        "#include <libavutil/avutil.h>\n",
+        "#include <libavutil/avutil.h>\n#include <libavutil/frame.h>\n",
+    )
+if "LIBAVUTIL_VERSION_MAJOR" not in s:
+    s = s.replace(
+        "#include <libavutil/frame.h>\n",
+        "#include <libavutil/frame.h>\n#include <libavutil/version.h>\n",
+    )
+
+p.write_text(s)
+PY
 RUN echo "** BUILDING TORCHVISION *** "
 RUN PYTHONNOUSERSITE=1 PYTHONPATH= TORCH_DISABLE_RPCLIB=1 TORCH_DISABLE_DISTRIBUTED=1 \
     LD_LIBRARY_PATH=/opt/py313/lib/python3.13/site-packages/torch/lib:${LD_LIBRARY_PATH} \
