@@ -1,0 +1,123 @@
+# Docker Buildfile for ROCm 6.4 to recompile PyTorch/Torchvision/Torchaudio
+# Arch Linux base image (rocm6_gfx803_base_arch:rmake)
+# created, build and compiled by Robert Rosenbusch at April 2025
+
+### Build rocm6_gfx803_base_arch:rmake first! Read the README.md, it could save lifetime :P
+FROM rocm6_gfx803_base_arch:rmake
+
+SHELL ["/bin/bash", "-c"]
+ENV WHISPERX_GUI_PORT=7860 \
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONENCODING==UTF-8 \
+    REQS_FILE='requirements.txt' \
+    COMMANDLINE_ARGS='' \
+    PIP_ROOT_USER_ACTION='ignore' \
+    ### For your AMD GPU
+    PYTORCH_ROCM_ARCH=gfx803 \
+    ROC_ENABLE_PRE_VEGA=1
+
+###########
+### Python 3.13 (OPT, cache-friendly: keep before cloning PyTorch)
+###########
+WORKDIR /
+RUN echo "** SETUP PYTHON 3.13 (OPT) *** "
+RUN if ! command -v python3.13 >/dev/null 2>&1; then \
+        sudo -u builder paru -S --noconfirm --needed python313; \
+    fi
+RUN python3.13 --version
+RUN python3.13 -m ensurepip --upgrade
+RUN python3.13 -m venv /opt/py313
+RUN /opt/py313/bin/python -m pip install --upgrade pip setuptools wheel
+
+###########
+### Build PyTorch
+###########
+ENV PYTORCH_GIT_VERSION="release/2.6"
+RUN echo "** Checkout PyTorch: ${PYTORCH_GIT_VERSION} **"
+RUN git clone --recursive https://github.com/ROCm/pytorch.git -b ${PYTORCH_GIT_VERSION} /pytorch_system_nogpu
+
+# Fix gloo types header missing cstdint include (breaks with some toolchains)
+RUN sed -i '30i\\#include <cstdint>' /pytorch_system_nogpu/third_party/gloo/gloo/types.h
+
+WORKDIR /pytorch_system_nogpu
+
+# Make bundled protobuf compatible with CMake >= 4 (after Python layer to preserve cache)
+RUN sed -i 's/cmake_minimum_required(VERSION 3.0)/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch_system_nogpu/third_party/protobuf/cmake/CMakeLists.txt
+RUN echo "** PYTORCH DEPS *** "
+RUN sudo -u builder paru -S --noconfirm --needed protobuf
+RUN mkdir -p /pytorch_system_nogpu/dist
+RUN /opt/py313/bin/python setup.py clean
+RUN /opt/py313/bin/pip install -r ${REQS_FILE}
+
+RUN echo "** PYTORCH BUILD AMD *** "
+RUN USE_FBGEMM=1 USE_TENSORPIPE=0 USE_NNPACK=0 USE_DISTRIBUTED=0 USE_RPC=0 USE_SYSTEM_PROTOBUF=1 BUILD_CUSTOM_PROTOBUF=OFF CXXFLAGS="-Wno-error=maybe-uninitialized" /opt/py313/bin/python tools/amd_build/build_amd.py
+
+# Fix psimd cmake minimum for CMake >= 4 (force line 1 after amd_build to avoid reset)
+RUN sed -i '1s/.*/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch_system_nogpu/third_party/psimd/CMakeLists.txt
+RUN head -n 3 /pytorch_system_nogpu/third_party/psimd/CMakeLists.txt
+RUN sed -i '1s/.*/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch_system_nogpu/third_party/FP16/CMakeLists.txt
+RUN head -n 3 /pytorch_system_nogpu/third_party/FP16/CMakeLists.txt
+RUN sed -i '1s/.*/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch_system_nogpu/third_party/NNPACK/CMakeLists.txt
+RUN head -n 3 /pytorch_system_nogpu/third_party/NNPACK/CMakeLists.txt
+RUN sed -i 's/VERSION 2.8.12/VERSION 3.5...4.2/' /pytorch_system_nogpu/third_party/ittapi/CMakeLists.txt
+RUN grep -n "cmake_minimum_required" /pytorch_system_nogpu/third_party/ittapi/CMakeLists.txt
+RUN sed -i 's/VERSION 2.8.12/VERSION 3.5...4.2/' /pytorch_system_nogpu/third_party/gloo/CMakeLists.txt
+RUN grep -n "cmake_minimum_required" /pytorch_system_nogpu/third_party/gloo/CMakeLists.txt
+RUN sed -E -i 's/VERSION [0-9.]+/VERSION 3.5...4.2/' /pytorch_system_nogpu/third_party/ideep/mkl-dnn/CMakeLists.txt
+RUN grep -n "cmake_minimum_required" /pytorch_system_nogpu/third_party/ideep/mkl-dnn/CMakeLists.txt
+
+RUN echo "** PYTORCH WHEEL *** "
+RUN BUILD_TEST=0 USE_NNPACK=0 USE_TENSORPIPE=0 USE_DISTRIBUTED=0 USE_RPC=0 USE_SYSTEM_PROTOBUF=1 BUILD_CUSTOM_PROTOBUF=OFF CXXFLAGS="-Wno-error=maybe-uninitialized" /opt/py313/bin/python setup.py bdist_wheel
+
+RUN echo "** PYTORCH INSTALL *** "
+RUN /opt/py313/bin/pip uninstall -y torch torchvision torchaudio || true \
+    && rm -rf /opt/py313/lib/python3.13/site-packages/torch* \
+    && /opt/py313/bin/pip install --no-deps dist/torch*.whl
+# Workaround: avoid rpc import crash during torch init while keeping a stub module
+RUN /opt/py313/bin/python -c "from pathlib import Path; import shutil; rpc_dir = Path('/opt/py313/lib/python3.13/site-packages/torch/distributed/rpc'); shutil.rmtree(rpc_dir, ignore_errors=True); rpc_dir.mkdir(parents=True, exist_ok=True); (rpc_dir / '__init__.py').write_text(\"def _disabled(*args, **kwargs):\\n    raise RuntimeError('torch.distributed.rpc is disabled in this build')\\n\\n\" \"def is_available():\\n    return False\\n\\n\" \"init_rpc = _disabled\\nshutdown = _disabled\\nrpc_sync = _disabled\\nrpc_async = _disabled\\nremote = _disabled\\n__all__ = ['is_available', 'init_rpc', 'shutdown', 'rpc_sync', 'rpc_async', 'remote']\\n\")"
+RUN rm -rf /pytorch_system_nogpu
+WORKDIR /
+RUN echo "** TORCH IMPORT SANITY *** "
+RUN /opt/py313/bin/python -c "import os, sys, site, glob; print('sys.path:'); [print('  ', p) for p in sys.path]; print('site-packages:', site.getsitepackages()); print('torch candidates:'); [print('  ', p) for sp in site.getsitepackages() for pat in ('torch*','*torch*') for p in glob.glob(os.path.join(sp, pat))]"
+RUN PYTHONNOUSERSITE=1 PYTHONPATH= TORCH_DISABLE_RPCLIB=1 TORCH_DISABLE_DISTRIBUTED=1 \
+    TORCH_SHOW_CPP_STACKTRACES=1 PYTHONFAULTHANDLER=1 \
+    LD_LIBRARY_PATH=/opt/py313/lib/python3.13/site-packages/torch/lib:${LD_LIBRARY_PATH} \
+    /opt/py313/bin/python -c "import torch; print(torch.__version__); print(torch.__file__)"
+
+###########
+### Build TorchVision
+###########
+ENV TORCH_GIT_VERSION="release/0.21"
+RUN echo "** Checkout Torchvision Version: ${TORCH_GIT_VERSION} ** "
+RUN git clone https://github.com/pytorch/vision.git -b ${TORCH_GIT_VERSION} /vision
+
+WORKDIR /vision
+RUN printf '%s' $'from pathlib import Path\n\np = Path(\"/vision/torchvision/csrc/io/decoder/video_stream.cpp\")\ns = p.read_text()\n\nold = \"header->keyFrame = frame_->key_frame;\"\nnew = (\n    \"#if LIBAVUTIL_VERSION_MAJOR >= 59\\n\"\n    \"    header->keyFrame = (frame_->flags & AV_FRAME_FLAG_KEY) != 0;\\n\"\n    \"#else\\n\"\n    \"    header->keyFrame = frame_->key_frame;\\n\"\n    \"#endif\"\n)\ns = s.replace(old, new)\n\nif \"#include <libavutil/frame.h>\" not in s:\n    s = s.replace(\n        \"#include <libavutil/avutil.h>\\n\",\n        \"#include <libavutil/avutil.h>\\n#include <libavutil/frame.h>\\n\",\n    )\nif \"LIBAVUTIL_VERSION_MAJOR\" not in s:\n    s = s.replace(\n        \"#include <libavutil/frame.h>\\n\",\n        \"#include <libavutil/frame.h>\\n#include <libavutil/version.h>\\n\",\n    )\n\np.write_text(s)\n' > /tmp/patch_video_stream.py \
+ && /opt/py313/bin/python /tmp/patch_video_stream.py \
+ && rm -f /tmp/patch_video_stream.py
+RUN echo "** BUILDING TORCHVISION *** "
+RUN PYTHONNOUSERSITE=1 PYTHONPATH= TORCH_DISABLE_RPCLIB=1 TORCH_DISABLE_DISTRIBUTED=1 \
+    LD_LIBRARY_PATH=/opt/py313/lib/python3.13/site-packages/torch/lib:${LD_LIBRARY_PATH} \
+    /opt/py313/bin/python setup.py bdist_wheel
+RUN /opt/py313/bin/pip install dist/torchvision-*.whl
+RUN mkdir -p /vision/dist
+
+###########
+### Build TorchAudio
+###########
+ENV TORCHAUDIO_GIT_VERSION="v2.6.0"
+RUN echo "** Checkout Torchaudio Version: ${TORCHAUDIO_GIT_VERSION} **"
+RUN git clone https://github.com/pytorch/audio.git -b ${TORCHAUDIO_GIT_VERSION} /audio
+
+WORKDIR /audio
+RUN echo "** BUILDING Torchaudio **"
+RUN sudo -u builder paru -S --noconfirm --needed base-devel ninja
+RUN /opt/py313/bin/python setup.py bdist_wheel
+RUN /opt/py313/bin/pip install dist/*.whl
+
+######
+# End of building pytorch and torchvision WHL-Files
+###########
+
+CMD ["/bin/bash","-c"]
