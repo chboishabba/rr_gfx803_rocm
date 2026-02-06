@@ -71,6 +71,8 @@ RUN BUILD_TEST=0 USE_NNPACK=0 USE_TENSORPIPE=0 USE_SYSTEM_PROTOBUF=1 BUILD_CUSTO
 
 RUN echo "** PYTORCH INSTALL *** "
 RUN /opt/py313/bin/pip install dist/torch*.whl
+RUN echo "** TORCH IMPORT SANITY *** "
+RUN /opt/py313/bin/python -c "import torch; print(torch.__version__); print(torch.__file__)"
 
 ###########
 ### Build TorchVision
@@ -81,7 +83,7 @@ RUN git clone https://github.com/pytorch/vision.git -b ${TORCH_GIT_VERSION} /vis
 
 WORKDIR /vision
 RUN echo "** BUILDING TORCHVISION *** "
-RUN /opt/py313/bin/python setup.py bdist_wheel
+RUN PYTHONNOUSERSITE=1 PYTHONPATH=/opt/py313/lib/python3.13/site-packages /opt/py313/bin/python setup.py bdist_wheel
 RUN /opt/py313/bin/pip install dist/torchvision-*.whl
 RUN mkdir -p /vision/dist
 
