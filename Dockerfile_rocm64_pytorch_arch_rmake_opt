@@ -72,8 +72,10 @@ RUN BUILD_TEST=0 USE_NNPACK=0 USE_TENSORPIPE=0 USE_SYSTEM_PROTOBUF=1 BUILD_CUSTO
 RUN echo "** PYTORCH INSTALL *** "
 RUN /opt/py313/bin/pip install dist/torch*.whl
 RUN rm -rf /pytorch_system_nogpu
+WORKDIR /
 RUN echo "** TORCH IMPORT SANITY *** "
-RUN /opt/py313/bin/python -c "import torch; print(torch.__version__); print(torch.__file__)"
+RUN /opt/py313/bin/python -c "import os, sys, site, glob; print('sys.path:'); [print('  ', p) for p in sys.path]; print('site-packages:', site.getsitepackages()); print('torch candidates:'); [print('  ', p) for sp in site.getsitepackages() for pat in ('torch*','*torch*') for p in glob.glob(os.path.join(sp, pat))]"
+RUN PYTHONNOUSERSITE=1 PYTHONPATH= /opt/py313/bin/python -c "import torch; print(torch.__version__); print(torch.__file__)"
 
 ###########
 ### Build TorchVision
