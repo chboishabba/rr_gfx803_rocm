@@ -1,43 +1,115 @@
-# Context: rr_gfx803_rocm build flow (torch -> torchvision)
+# Context: Full ROCm gfx803 Workflow (Base -> PyTorch -> Torchvision/Torchaudio)
 
-## Goal
-Build a ROCm-enabled PyTorch wheel (cached) and then build torchvision against that wheel for gfx803 on Arch-based ROCm 6.4 base images.
+This document summarizes the full build flow used in this repo, with references to the older Ubuntu-based Dockerfiles and the current Arch/rmake flow. It also enumerates known pitfalls.
 
-## Current State
-- Dockerfile: `Dockerfile_rocm64_pytorch_arch_rmake_opt`
-- PyTorch build completes and wheel is installed into `/opt/py313`.
-- Torchvision build fails at `setup.py bdist_wheel` with:
-  `generic_type: cannot initialize type "RpcBackendOptions": an object with that name is already defined`.
+## Sources (Ubuntu-based references)
+- `Dockerfile_rocm64_base` (ROCm 6.4, Ubuntu 24.04, base image)
+- `rocm_6.3.4/Dockerfile_rocm634_base` (ROCm 6.3.4, Ubuntu 24.04, base image)
+- `rocm_5.4/Dockerfile.base_rocm5.4_source_compile` (ROCm 5.4.2, Ubuntu 22.04, source compile of torch/vision/audio)
 
-## Key Steps (required)
-1. Build base image `rocm6_gfx803_base_arch:rmake` first (per README).
-2. Create Python 3.13 venv at `/opt/py313`.
-3. Clone ROCm PyTorch (`release/2.6`) into `/pytorch`.
-4. Apply gloo and CMake version fixes.
-5. Build PyTorch using `tools/amd_build/build_amd.py`.
-6. Build and install torch wheel from `/pytorch/dist` into `/opt/py313`.
-7. Clone torchvision (`release/0.21`) into `/vision`.
-8. Build and install torchvision wheel from `/vision/dist`.
+## Current Arch/rmake path
+- `Dockerfile_rocm64_base_arch_pinned_rmake` (Arch base + ROCm + rmake)
+- `Dockerfile_rocm64_pytorch_arch_rmake_opt` (PyTorch -> Torchvision -> Torchaudio)
 
-## Pitfalls / Gotchas
-- **Mixed torch imports**: The torchvision build crash indicates the Python process is loading two different `torch` builds (duplicate type registration). This typically happens if `sys.path` includes a source tree or an extra install path in addition to the installed wheel.
-- **PYTHONPATH leakage**: Any `PYTHONPATH` pointing at `/pytorch` (or a previous site-packages) can cause duplicate `torch` loads.
-- **Stale build artifacts**: A previous or partial `torch` build in the working directory can shadow the installed wheel.
-- **Build caching confusion**: Docker cache can hide which layers actually ran. Make sure the torch wheel install layer is used and no later layer reintroduces another torch copy.
+---
 
-## Recommended Guardrails for Torchvision Build
-- Ensure a clean Python path for torchvision build:
-  - Use `PYTHONNOUSERSITE=1`.
-  - Clear `PYTHONPATH` (empty) for the build command.
-- Optional but safe: remove `/pytorch` after installing the torch wheel to prevent accidental imports from the source tree.
+## Full Workflow Overview (Base -> Now)
 
-## Minimal Fix (torchvision build layer)
-Use a clean environment when building torchvision:
-- `PYTHONNOUSERSITE=1 PYTHONPATH= /opt/py313/bin/python setup.py bdist_wheel`
+### 1) Base Image (Ubuntu reference)
+From `Dockerfile_rocm64_base` / `rocm_6.3.4/Dockerfile_rocm634_base`:
+- Base: `rocm/dev-ubuntu-24.04:*`.
+- Set environment for gfx803:
+  - `HSA_OVERRIDE_GFX_VERSION=8.0.3`, `PYTORCH_ROCM_ARCH=gfx803`, `ROCM_ARCH=gfx803`.
+  - `ROC_ENABLE_PRE_VEGA=1`, `TORCH_BLAS_PREFER_HIPBLASLT=0`, `USE_ROCM=1`, `FORCE_CUDA=1`.
+- Install build tools and runtime deps:
+  - `git`, `cmake`, `python3`, `python3-venv`, `wget`, `ffmpeg`, `libomp-dev`, `libopenblas-dev`, `ccache`, etc.
+- (Optional) install `amdgpu_top` for monitoring.
+- (Optional) recompile rocBLAS for gfx803.
 
-Optional: remove `/pytorch` after torch install:
-- `RUN rm -rf /pytorch`
+### 2) Base Image (Arch/rmake current)
+From `Dockerfile_rocm64_base_arch_pinned_rmake`:
+- Base: `archlinux:latest` with ROCm pinned paths and rmake flow.
+- Similar env exports for gfx803 + ROCm.
+- Use `paru` to install build tools and ROCm components:
+  - `rocm-cmake`, `rocm-llvm`, `rocm-hip-sdk`, etc.
+- Create `.venv` for helper tools (not the main PyTorch venv).
+
+### 3) PyTorch Build (Current)
+From `Dockerfile_rocm64_pytorch_arch_rmake_opt`:
+- Create Python 3.13 venv at `/opt/py313`.
+- Clone ROCm PyTorch `release/2.6` into `/pytorch`.
+- Apply CMake and header fixes:
+  - `gloo/types.h` add `<cstdint>`.
+  - `protobuf`, `psimd`, `FP16`, `NNPACK`, `ittapi`, `gloo`, `ideep` CMake minimum version bumps for CMake >= 4.
+- Install build deps (`protobuf` etc.).
+- Run `tools/amd_build/build_amd.py`.
+- Build wheel with `setup.py bdist_wheel`.
+- Install the wheel into `/opt/py313`.
+
+### 4) Torchvision Build (Current)
+From `Dockerfile_rocm64_pytorch_arch_rmake_opt`:
+- Clone `pytorch/vision` `release/0.21` to `/vision`.
+- Build wheel with `setup.py bdist_wheel`.
+- Install built torchvision wheel.
+
+### 5) Torchaudio Build (Current)
+From `Dockerfile_rocm64_pytorch_arch_rmake_opt`:
+- Clone `pytorch/audio` `v2.6.0` to `/audio`.
+- Build wheel with `setup.py bdist_wheel`.
+- Install built torchaudio wheel.
+
+---
+
+## Known Pitfalls / Failure Modes
+
+### A) Torchvision crash: `generic_type: cannot initialize type "RpcBackendOptions"`
+- Cause: The torchvision build process loads two separate `torch` binaries in the same Python process.
+- Typical triggers:
+  - `PYTHONPATH` or `sys.path` includes `/pytorch` or any other torch source tree.
+  - Multiple `torch` installs in different site-packages.
+  - Build environment picks up the source tree in addition to the installed wheel.
+
+### B) CMake version incompatibilities
+- Newer CMake (>= 4) breaks older subprojects.
+- Fixes required in PyTorch tree:
+  - `third_party/protobuf/cmake/CMakeLists.txt`
+  - `third_party/psimd/CMakeLists.txt`
+  - `third_party/FP16/CMakeLists.txt`
+  - `third_party/NNPACK/CMakeLists.txt`
+  - `third_party/ittapi/CMakeLists.txt`
+  - `third_party/gloo/CMakeLists.txt`
+  - `third_party/ideep/mkl-dnn/CMakeLists.txt`
+
+### C) ROCm gfx803 quirks
+- `HSA_OVERRIDE_GFX_VERSION=8.0.3` and `ROC_ENABLE_PRE_VEGA=1` must be set.
+- `TORCH_BLAS_PREFER_HIPBLASLT=0` recommended for this arch.
+
+### D) Docker cache confusion
+- PyTorch build is long. The desired flow is to **reuse cached layers** rather than rebuild.
+- Ensure the PyTorch build steps remain unchanged to keep cache hits.
+
+---
+
+## Guardrails to Prevent Torchvision Crash
+
+Use a clean environment for the torchvision build:
+- Ensure `PYTHONNOUSERSITE=1`.
+- Ensure `PYTHONPATH` is empty for the build step.
+
+Optional safety:
+- Remove `/pytorch` after installing the torch wheel (prevents accidental source import).
+
+---
+
+## Minimal Fix Summary (Torchvision build layer)
+- Build torchvision with clean environment:
+  - `PYTHONNOUSERSITE=1 PYTHONPATH= /opt/py313/bin/python setup.py bdist_wheel`
+
+Optional:
+- `RUN rm -rf /pytorch` after `pip install dist/torch*.whl`.
+
+---
 
 ## Notes
-- Do not skip or replace the PyTorch build; it is already built and should be cached in the Docker layers.
-- The failure happens after `Step 44: ** BUILDING TORCHVISION ***`.
+- The torch build **must not be skipped**. It is already built and should be cached.
+- The break happens right after `Step 44: ** BUILDING TORCHVISION ***` in the build logs.

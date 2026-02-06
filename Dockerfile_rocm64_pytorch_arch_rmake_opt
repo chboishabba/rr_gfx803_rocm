@@ -34,18 +34,18 @@ RUN /opt/py313/bin/python -m pip install --upgrade pip setuptools wheel
 ###########
 ENV PYTORCH_GIT_VERSION="release/2.6"
 RUN echo "** Checkout PyTorch: ${PYTORCH_GIT_VERSION} **"
-RUN git clone --recursive https://github.com/ROCm/pytorch.git -b ${PYTORCH_GIT_VERSION} /pytorch
+RUN git clone --recursive https://github.com/ROCm/pytorch.git -b ${PYTORCH_GIT_VERSION} /pytorch_system_nogpu
 
 # Fix gloo types header missing cstdint include (breaks with some toolchains)
-RUN sed -i '30i\\#include <cstdint>' /pytorch/third_party/gloo/gloo/types.h
+RUN sed -i '30i\\#include <cstdint>' /pytorch_system_nogpu/third_party/gloo/gloo/types.h
 
-WORKDIR /pytorch
+WORKDIR /pytorch_system_nogpu
 
 # Make bundled protobuf compatible with CMake >= 4 (after Python layer to preserve cache)
-RUN sed -i 's/cmake_minimum_required(VERSION 3.0)/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch/third_party/protobuf/cmake/CMakeLists.txt
+RUN sed -i 's/cmake_minimum_required(VERSION 3.0)/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch_system_nogpu/third_party/protobuf/cmake/CMakeLists.txt
 RUN echo "** PYTORCH DEPS *** "
 RUN sudo -u builder paru -S --noconfirm --needed protobuf
-RUN mkdir -p /pytorch/dist
+RUN mkdir -p /pytorch_system_nogpu/dist
 RUN /opt/py313/bin/python setup.py clean
 RUN /opt/py313/bin/pip install -r ${REQS_FILE}
 
@@ -53,24 +53,25 @@ RUN echo "** PYTORCH BUILD AMD *** "
 RUN USE_FBGEMM=1 USE_TENSORPIPE=0 USE_NNPACK=0 USE_SYSTEM_PROTOBUF=1 BUILD_CUSTOM_PROTOBUF=OFF CXXFLAGS="-Wno-error=maybe-uninitialized" /opt/py313/bin/python tools/amd_build/build_amd.py
 
 # Fix psimd cmake minimum for CMake >= 4 (force line 1 after amd_build to avoid reset)
-RUN sed -i '1s/.*/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch/third_party/psimd/CMakeLists.txt
-RUN head -n 3 /pytorch/third_party/psimd/CMakeLists.txt
-RUN sed -i '1s/.*/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch/third_party/FP16/CMakeLists.txt
-RUN head -n 3 /pytorch/third_party/FP16/CMakeLists.txt
-RUN sed -i '1s/.*/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch/third_party/NNPACK/CMakeLists.txt
-RUN head -n 3 /pytorch/third_party/NNPACK/CMakeLists.txt
-RUN sed -i 's/VERSION 2.8.12/VERSION 3.5...4.2/' /pytorch/third_party/ittapi/CMakeLists.txt
-RUN grep -n "cmake_minimum_required" /pytorch/third_party/ittapi/CMakeLists.txt
-RUN sed -i 's/VERSION 2.8.12/VERSION 3.5...4.2/' /pytorch/third_party/gloo/CMakeLists.txt
-RUN grep -n "cmake_minimum_required" /pytorch/third_party/gloo/CMakeLists.txt
-RUN sed -E -i 's/VERSION [0-9.]+/VERSION 3.5...4.2/' /pytorch/third_party/ideep/mkl-dnn/CMakeLists.txt
-RUN grep -n "cmake_minimum_required" /pytorch/third_party/ideep/mkl-dnn/CMakeLists.txt
+RUN sed -i '1s/.*/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch_system_nogpu/third_party/psimd/CMakeLists.txt
+RUN head -n 3 /pytorch_system_nogpu/third_party/psimd/CMakeLists.txt
+RUN sed -i '1s/.*/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch_system_nogpu/third_party/FP16/CMakeLists.txt
+RUN head -n 3 /pytorch_system_nogpu/third_party/FP16/CMakeLists.txt
+RUN sed -i '1s/.*/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch_system_nogpu/third_party/NNPACK/CMakeLists.txt
+RUN head -n 3 /pytorch_system_nogpu/third_party/NNPACK/CMakeLists.txt
+RUN sed -i 's/VERSION 2.8.12/VERSION 3.5...4.2/' /pytorch_system_nogpu/third_party/ittapi/CMakeLists.txt
+RUN grep -n "cmake_minimum_required" /pytorch_system_nogpu/third_party/ittapi/CMakeLists.txt
+RUN sed -i 's/VERSION 2.8.12/VERSION 3.5...4.2/' /pytorch_system_nogpu/third_party/gloo/CMakeLists.txt
+RUN grep -n "cmake_minimum_required" /pytorch_system_nogpu/third_party/gloo/CMakeLists.txt
+RUN sed -E -i 's/VERSION [0-9.]+/VERSION 3.5...4.2/' /pytorch_system_nogpu/third_party/ideep/mkl-dnn/CMakeLists.txt
+RUN grep -n "cmake_minimum_required" /pytorch_system_nogpu/third_party/ideep/mkl-dnn/CMakeLists.txt
 
 RUN echo "** PYTORCH WHEEL *** "
 RUN BUILD_TEST=0 USE_NNPACK=0 USE_TENSORPIPE=0 USE_SYSTEM_PROTOBUF=1 BUILD_CUSTOM_PROTOBUF=OFF CXXFLAGS="-Wno-error=maybe-uninitialized" /opt/py313/bin/python setup.py bdist_wheel
 
 RUN echo "** PYTORCH INSTALL *** "
 RUN /opt/py313/bin/pip install dist/torch*.whl
+RUN rm -rf /pytorch_system_nogpu
 RUN echo "** TORCH IMPORT SANITY *** "
 RUN /opt/py313/bin/python -c "import torch; print(torch.__version__); print(torch.__file__)"
 
@@ -83,7 +84,7 @@ RUN git clone https://github.com/pytorch/vision.git -b ${TORCH_GIT_VERSION} /vis
 
 WORKDIR /vision
 RUN echo "** BUILDING TORCHVISION *** "
-RUN PYTHONNOUSERSITE=1 PYTHONPATH=/opt/py313/lib/python3.13/site-packages /opt/py313/bin/python setup.py bdist_wheel
+RUN PYTHONNOUSERSITE=1 PYTHONPATH= /opt/py313/bin/python setup.py bdist_wheel
 RUN /opt/py313/bin/pip install dist/torchvision-*.whl
 RUN mkdir -p /vision/dist
 
