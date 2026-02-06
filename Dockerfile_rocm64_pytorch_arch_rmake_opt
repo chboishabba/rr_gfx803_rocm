@@ -50,7 +50,7 @@ RUN /opt/py313/bin/python setup.py clean
 RUN /opt/py313/bin/pip install -r ${REQS_FILE}
 
 RUN echo "** PYTORCH BUILD AMD *** "
-RUN USE_FBGEMM=1 USE_TENSORPIPE=0 USE_NNPACK=0 USE_SYSTEM_PROTOBUF=1 BUILD_CUSTOM_PROTOBUF=OFF CXXFLAGS="-Wno-error=maybe-uninitialized" /opt/py313/bin/python tools/amd_build/build_amd.py
+RUN USE_FBGEMM=1 USE_TENSORPIPE=0 USE_NNPACK=0 USE_DISTRIBUTED=0 USE_RPC=0 USE_SYSTEM_PROTOBUF=1 BUILD_CUSTOM_PROTOBUF=OFF CXXFLAGS="-Wno-error=maybe-uninitialized" /opt/py313/bin/python tools/amd_build/build_amd.py
 
 # Fix psimd cmake minimum for CMake >= 4 (force line 1 after amd_build to avoid reset)
 RUN sed -i '1s/.*/cmake_minimum_required(VERSION 3.5...4.2)/' /pytorch_system_nogpu/third_party/psimd/CMakeLists.txt
@@ -67,15 +67,22 @@ RUN sed -E -i 's/VERSION [0-9.]+/VERSION 3.5...4.2/' /pytorch_system_nogpu/third
 RUN grep -n "cmake_minimum_required" /pytorch_system_nogpu/third_party/ideep/mkl-dnn/CMakeLists.txt
 
 RUN echo "** PYTORCH WHEEL *** "
-RUN BUILD_TEST=0 USE_NNPACK=0 USE_TENSORPIPE=0 USE_SYSTEM_PROTOBUF=1 BUILD_CUSTOM_PROTOBUF=OFF CXXFLAGS="-Wno-error=maybe-uninitialized" /opt/py313/bin/python setup.py bdist_wheel
+RUN BUILD_TEST=0 USE_NNPACK=0 USE_TENSORPIPE=0 USE_DISTRIBUTED=0 USE_RPC=0 USE_SYSTEM_PROTOBUF=1 BUILD_CUSTOM_PROTOBUF=OFF CXXFLAGS="-Wno-error=maybe-uninitialized" /opt/py313/bin/python setup.py bdist_wheel
 
 RUN echo "** PYTORCH INSTALL *** "
-RUN /opt/py313/bin/pip install dist/torch*.whl
+RUN /opt/py313/bin/pip uninstall -y torch torchvision torchaudio || true \
+    && rm -rf /opt/py313/lib/python3.13/site-packages/torch* \
+    && /opt/py313/bin/pip install --no-deps dist/torch*.whl
+# Workaround: avoid rpc import crash during torch init while keeping a stub module
+RUN /opt/py313/bin/python -c "from pathlib import Path; import shutil; rpc_dir = Path('/opt/py313/lib/python3.13/site-packages/torch/distributed/rpc'); shutil.rmtree(rpc_dir, ignore_errors=True); rpc_dir.mkdir(parents=True, exist_ok=True); (rpc_dir / '__init__.py').write_text(\"def _disabled(*args, **kwargs):\\n    raise RuntimeError('torch.distributed.rpc is disabled in this build')\\n\\n\" \"def is_available():\\n    return False\\n\\n\" \"init_rpc = _disabled\\nshutdown = _disabled\\nrpc_sync = _disabled\\nrpc_async = _disabled\\nremote = _disabled\\n__all__ = ['is_available', 'init_rpc', 'shutdown', 'rpc_sync', 'rpc_async', 'remote']\\n\")"
 RUN rm -rf /pytorch_system_nogpu
 WORKDIR /
 RUN echo "** TORCH IMPORT SANITY *** "
 RUN /opt/py313/bin/python -c "import os, sys, site, glob; print('sys.path:'); [print('  ', p) for p in sys.path]; print('site-packages:', site.getsitepackages()); print('torch candidates:'); [print('  ', p) for sp in site.getsitepackages() for pat in ('torch*','*torch*') for p in glob.glob(os.path.join(sp, pat))]"
-RUN PYTHONNOUSERSITE=1 PYTHONPATH= /opt/py313/bin/python -c "import torch; print(torch.__version__); print(torch.__file__)"
+RUN PYTHONNOUSERSITE=1 PYTHONPATH= TORCH_DISABLE_RPCLIB=1 TORCH_DISABLE_DISTRIBUTED=1 \
+    TORCH_SHOW_CPP_STACKTRACES=1 PYTHONFAULTHANDLER=1 \
+    LD_LIBRARY_PATH=/opt/py313/lib/python3.13/site-packages/torch/lib:${LD_LIBRARY_PATH} \
+    /opt/py313/bin/python -c "import torch; print(torch.__version__); print(torch.__file__)"
 
 ###########
 ### Build TorchVision
@@ -86,7 +93,9 @@ RUN git clone https://github.com/pytorch/vision.git -b ${TORCH_GIT_VERSION} /vis
 
 WORKDIR /vision
 RUN echo "** BUILDING TORCHVISION *** "
-RUN PYTHONNOUSERSITE=1 PYTHONPATH= /opt/py313/bin/python setup.py bdist_wheel
+RUN PYTHONNOUSERSITE=1 PYTHONPATH= TORCH_DISABLE_RPCLIB=1 TORCH_DISABLE_DISTRIBUTED=1 \
+    LD_LIBRARY_PATH=/opt/py313/lib/python3.13/site-packages/torch/lib:${LD_LIBRARY_PATH} \
+    /opt/py313/bin/python setup.py bdist_wheel
 RUN /opt/py313/bin/pip install dist/torchvision-*.whl
 RUN mkdir -p /vision/dist
 
